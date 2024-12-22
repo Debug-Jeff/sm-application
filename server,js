@@ -1,0 +1,136 @@
+// server.js
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
+const { Sequelize, DataTypes } = require('sequelize');
+
+const app = express();
+const server = http.createServer(app);
+const io = socketIo(server);
+
+// Database setup
+const sequelize = new Sequelize('database', 'username', 'password', {
+  host: 'localhost',
+  dialect: 'postgres'
+});
+
+// User model
+const User = sequelize.define('User', {
+  username: {
+    type: DataTypes.STRING,
+    unique: true,
+    allowNull: false
+  },
+  password: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  publicKey: {
+    type: DataTypes.STRING,
+    allowNull: false
+  }
+});
+
+// Message model
+const Message = sequelize.define('Message', {
+  content: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  senderId: {
+    type: DataTypes.INTEGER,
+    allowNull: false
+  },
+  receiverId: {
+    type: DataTypes.INTEGER,
+    allowNull: false
+  }
+});
+
+sequelize.sync();
+
+// Middleware for JWT authentication
+const authenticateJWT = (req, res, next) => {
+  const token = req.header('Authorization');
+  if (token) {
+    jwt.verify(token, 'your_jwt_secret', (err, user) => {
+      if (err) {
+        return res.sendStatus(403);
+      }
+      req.user = user;
+      next();
+    });
+  } else {
+    res.sendStatus(401);
+  }
+};
+
+// Routes
+app.post('/register', async (req, res) => {
+  try {
+    const { username, password, publicKey } = req.body;
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = await User.create({ username, password: hashedPassword, publicKey });
+    res.status(201).json({ message: 'User registered successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Error registering user' });
+  }
+});
+
+app.post('/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const user = await User.findOne({ where: { username } });
+    if (user && await bcrypt.compare(password, user.password)) {
+      const token = jwt.sign({ id: user.id, username: user.username }, 'your_jwt_secret');
+      res.json({ token });
+    } else {
+      res.status(401).json({ error: 'Invalid credentials' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: 'Error logging in' });
+  }
+});
+
+app.get('/messages', authenticateJWT, async (req, res) => {
+  try {
+    const messages = await Message.findAll({
+      where: {
+        [Sequelize.Op.or]: [
+          { senderId: req.user.id },
+          { receiverId: req.user.id }
+        ]
+      }
+    });
+    res.json(messages);
+  } catch (error) {
+    res.status(500).json({ error: 'Error fetching messages' });
+  }
+});
+
+// Socket.IO for real-time messaging
+io.on('connection', (socket) => {
+  console.log('New client connected');
+  
+  socket.on('sendMessage', async (data) => {
+    try {
+      const { content, receiverId } = data;
+      const message = await Message.create({
+        content,
+        senderId: socket.user.id,
+        receiverId
+      });
+      io.to(receiverId).emit('newMessage', message);
+    } catch (error) {
+      console.error('Error sending message:', error);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log('Client disconnected');
+  });
+});
+
+server.listen(3000, () => console.log('Server running on port 3000'));
